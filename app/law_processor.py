@@ -63,62 +63,207 @@ def make_article_number(조문번호, 조문가지번호):
     return f"제{조문번호}조의{조문가지번호}" if 조문가지번호 and 조문가지번호 != "0" else f"제{조문번호}조"
 
 def has_batchim(word):
+    """단어의 마지막 글자에 받침이 있는지 확인"""
+    if not word:
+        return False
     code = ord(word[-1]) - 0xAC00
     return (code % 28) != 0
 
 def has_rieul_batchim(word):
+    """단어의 마지막 글자의 받침이 ㄹ인지 확인"""
+    if not word:
+        return False
     code = ord(word[-1]) - 0xAC00
-    return (code % 28) == 8
+    return (code % 28) == 8  # ㄹ받침 코드는 8
 
 def extract_chunk_and_josa(token, searchword):
-    # 제외할 접미사 리스트 (만, 만을 등도 추가)
-    suffix_exclude = ["의", "에", "에서", "으로서", "등", "에게", "만", "만을", "만이", "만은", "만을", "만으로"]
+    """검색어를 포함하는 덩어리와 조사를 추출"""
+    # 제외할 접미사 리스트
+    suffix_exclude = ["의", "에", "에서", "으로서", "등", "에게", "만", "만을", "만이", "만은", "만에", "만으로"]
     
-    # 가장 긴 접미사부터 확인
-    sorted_suffixes = sorted(suffix_exclude, key=len, reverse=True)
+    # 처리할 조사 리스트
+    josa_list = ["을", "를", "과", "와", "이", "가", "이나", "나", "으로", "로", "은", "는", "란", "이란"]
+    
+    # 원본 토큰 저장
     original_token = token
+    suffix = None
     
-    for suffix in sorted_suffixes:
-        if token.endswith(suffix) and len(token) > len(suffix):
-            token = token[:-len(suffix)]
+    # 1. 접미사 제거 시도
+    for s in sorted(suffix_exclude, key=len, reverse=True):
+        if token.endswith(s) and len(token) > len(s):
+            suffix = s
+            token = token[:-len(s)]
             break
-            
-    josa_list = ["으로", "이나", "과", "와", "을", "를", "이", "가", "나", "로", "은", "는"]
-    pattern = re.compile(rf'({searchword}[가-힣0-9]*?)(?:{"|".join(josa_list)})?$')
-    match = pattern.match(token)
     
-    if match:
-        chunk = match.group(1)
-        josa = token[len(chunk):] if token[len(chunk):] in josa_list else None
-        
-        # 원래 토큰에서 접미사를 확인하고 청크에 추가
-        for suffix in sorted_suffixes:
-            if original_token.endswith(suffix) and not chunk.endswith(suffix):
-                return chunk, josa, suffix
-                
-        return chunk, josa, None
-    return token, None, None
+    # 2. 조사 확인
+    josa = None
+    chunk = token
+    
+    # 검색어로 끝나는 경우
+    if token.endswith(searchword):
+        chunk = token
+    # 검색어 + 조사 패턴 확인
+    else:
+        for j in sorted(josa_list, key=len, reverse=True):
+            if token.endswith(searchword + j):
+                chunk = token[:-len(j)]
+                josa = j
+                break
+    
+    # 3. 검색어 포함 확인
+    if searchword in chunk:
+        # 원래 토큰에서 검색어와 조사 이외의 나머지 부분을 포함하여 청크를 구성
+        return chunk, josa, suffix
+    
+    # 검색어를 포함하지 않는 경우
+    return token, None, suffix
 
 def apply_josa_rule(orig, replaced, josa):
-    b_has = has_batchim(replaced)
-    # 일관성 있는 규칙 적용
-    if josa is None:
-        return f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.'
+    """개정문 조사 규칙에 따라 적절한 형식 반환"""
+    orig_has_batchim = has_batchim(orig)
+    replaced_has_batchim = has_batchim(replaced)
+    replaced_has_rieul = has_rieul_batchim(replaced)
     
-    rules = {
-        "을": lambda: f'"{orig}"을 "{replaced}"로 한다.',
-        "를": lambda: f'"{orig}"를 "{replaced}"로 한다.',
-        "이": lambda: f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.',
-        "가": lambda: f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.',
-        "은": lambda: f'"{orig}"은 "{replaced}"로 한다.',
-        "는": lambda: f'"{orig}"는 "{replaced}"로 한다.',
-        "으로": lambda: f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.',
-        "로": lambda: f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.'
-    }
-    return rules.get(josa, lambda: f'"{orig}"을 "{replaced}"로 한다.' if has_batchim(orig) else f'"{orig}"를 "{replaced}"로 한다.')()
+    # 조사가 없는 경우 (규칙 0)
+    if josa is None:
+        if not orig_has_batchim:  # 규칙 0-1: A가 받침 없는 경우
+            if not replaced_has_batchim or replaced_has_rieul:  # 규칙 0-1-1, 0-1-2-1
+                return f'"{orig}"를 "{replaced}"로 한다.'
+            else:  # 규칙 0-1-2-2: B의 받침이 ㄹ이 아닌 경우
+                return f'"{orig}"를 "{replaced}"으로 한다.'
+        else:  # 규칙 0-2: A가 받침 있는 경우
+            if not replaced_has_batchim or replaced_has_rieul:  # 규칙 0-2-1, 0-2-2-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 0-2-2-2: B의 받침이 ㄹ이 아닌 경우
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+    
+    # 조사별 규칙 처리
+    if josa == "을":  # 규칙 1
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 1-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 1-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 1-2
+            return f'"{orig}을"을 "{replaced}를"로 한다.'
+    
+    elif josa == "를":  # 규칙 2
+        if replaced_has_batchim:  # 규칙 2-1
+            return f'"{orig}를"을 "{replaced}을"로 한다.'
+        else:  # 규칙 2-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "과":  # 규칙 3
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 3-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 3-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 3-2
+            return f'"{orig}과"를 "{replaced}와"로 한다.'
+    
+    elif josa == "와":  # 규칙 4
+        if replaced_has_batchim:  # 규칙 4-1
+            return f'"{orig}와"를 "{replaced}과"로 한다.'
+        else:  # 규칙 4-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "이":  # 규칙 5
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 5-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 5-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 5-2
+            return f'"{orig}이"를 "{replaced}가"로 한다.'
+    
+    elif josa == "가":  # 규칙 6
+        if replaced_has_batchim:  # 규칙 6-1
+            return f'"{orig}가"를 "{replaced}이"로 한다.'
+        else:  # 규칙 6-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "이나":  # 규칙 7
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 7-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 7-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 7-2
+            return f'"{orig}이나"를 "{replaced}나"로 한다.'
+    
+    elif josa == "나":  # 규칙 8
+        if replaced_has_batchim:  # 규칙 8-1
+            return f'"{orig}나"를 "{replaced}이나"로 한다.'
+        else:  # 규칙 8-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "으로":  # 규칙 9
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 9-1-1
+                return f'"{orig}으로"를 "{replaced}로"로 한다.'
+            else:  # 규칙 9-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 9-2
+            return f'"{orig}으로"를 "{replaced}로"로 한다.'
+    
+    elif josa == "로":  # 규칙 10
+        if orig_has_batchim:  # 규칙 10-1: A에 받침이 있는 경우
+            if replaced_has_batchim:
+                if replaced_has_rieul:  # 규칙 10-1-1-1
+                    return f'"{orig}"을 "{replaced}"로 한다.'
+                else:  # 규칙 10-1-1-2
+                    return f'"{orig}로"를 "{replaced}으로"로 한다.'
+            else:  # 규칙 10-1-2
+                return f'"{orig}"을 "{replaced}"로 한다.'
+        else:  # 규칙 10-2: A에 받침이 없는 경우
+            if replaced_has_batchim:
+                if replaced_has_rieul:  # 규칙 10-2-1-1
+                    return f'"{orig}"를 "{replaced}"로 한다.'
+                else:  # 규칙 10-2-1-2
+                    return f'"{orig}로"를 "{replaced}으로"로 한다.'
+            else:  # 규칙 10-2-2
+                return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "는":  # 규칙 11
+        if replaced_has_batchim:  # 규칙 11-1
+            return f'"{orig}는"을 "{replaced}은"으로 한다.'
+        else:  # 규칙 11-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "은":  # 규칙 12
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 12-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 12-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 12-2
+            return f'"{orig}은"을 "{replaced}는"으로 한다.'
+    
+    elif josa == "란":  # 규칙 13
+        if replaced_has_batchim:  # 규칙 13-1
+            return f'"{orig}란"을 "{replaced}이란"으로 한다.'
+        else:  # 규칙 13-2
+            return f'"{orig}"를 "{replaced}"로 한다.'
+    
+    elif josa == "이란":  # 규칙 14
+        if replaced_has_batchim:
+            if replaced_has_rieul:  # 규칙 14-1-1
+                return f'"{orig}"을 "{replaced}"로 한다.'
+            else:  # 규칙 14-1-2
+                return f'"{orig}"을 "{replaced}"으로 한다.'
+        else:  # 규칙 14-2
+            return f'"{orig}이란"을 "{replaced}란"으로 한다.'
+    
+    # 기본 출력 형식
+    if orig_has_batchim:
+        return f'"{orig}"을 "{replaced}"로 한다.'
+    else:
+        return f'"{orig}"를 "{replaced}"로 한다.'
 
 def format_location(location):
-    # 항번호가 비어있는 경우 "제항" 대신 "항" 제거
+    """위치 정보 형식 수정: 항번호가 비어있는 경우와 호번호, 목번호의 period 제거"""
+    # 항번호가 비어있는 경우 "제항" 제거
     location = re.sub(r'제(?=항)', '', location)
     
     # 호번호와 목번호 뒤의 period(.) 제거
@@ -128,7 +273,8 @@ def format_location(location):
     return location
 
 def group_locations(loc_list):
-    # 각 위치 문자열에 대해 형식 수정 적용
+    """위치 정보 그룹화"""
+    # 각 위치 문자열에 형식 수정 적용
     formatted_locs = [format_location(loc) for loc in loc_list]
     
     if len(formatted_locs) == 1:
@@ -198,6 +344,7 @@ def run_search_logic(query, unit="법률"):
     return result_dict
 
 def run_amendment_logic(find_word, replace_word):
+    """개정문 생성 로직"""
     amendment_results = []
     for idx, law in enumerate(get_law_list_from_api(find_word)):
         law_name = law["법령명"]
